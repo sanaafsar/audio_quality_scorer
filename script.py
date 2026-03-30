@@ -371,14 +371,14 @@ if __name__ == "__main__":
     print("Training embedding model...")
     embedder: Wav2Vec2Embedder
     normal_model: NormalModel
-    embedder, normal_model = train_embedding_model("good_audio")
+    embedder, normal_model = train_embedding_model("data/train")
 
     print("Training autoencoder...")
-    ae_model: SpectrogramAutoencoder = train_autoencoder("good_audio", device=DEVICE)
+    ae_model: SpectrogramAutoencoder = train_autoencoder("data/train", device=DEVICE)
 
     detector: AudioQualityDetector = AudioQualityDetector(embedder, normal_model, ae_model, device=DEVICE)
 
-    audio: ndarray = embedder.load_audio("test.wav")
+    audio: ndarray = embedder.load_audio("data/test/test.wav")
     result: Dict[str, Any] = detector.evaluate(audio)
 
     print("RESULT:", result)
