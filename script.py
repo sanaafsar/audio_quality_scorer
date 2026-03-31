@@ -335,13 +335,13 @@ class AudioQualityDetector:
             p95 (float): 95th percentile threshold for anomaly detection.
         
         Returns:
-            Dict[str, Any]: Dictionary with 'final_score' (float) and 'chunk_scores' (List[float]).
+            Dict[str, Any]: Dictionary with 'final_score' (float) and 'chunk_scores' (List[Dict[str, Any]]).
         """
         chunks = chunk_audio(audio)
 
         scores: List[float] = []
 
-        for c in chunks:
+        for i, c in enumerate(chunks):
             sig: float = signal_score(compute_signal_features(c))
             emb = self.embedder.get_embedding(c)
             anom = self.normal_model.score(emb)
@@ -351,10 +351,10 @@ class AudioQualityDetector:
                 ae = self.ae_score(c)
 
             final: float = 0.6 * anom + 0.3 * sig + 0.1 * ae
-            scores.append(final/p95)  # Normalize by p95 to get relative anomaly score
+            scores.append({"score": final / p95, "time": str(i*3)+" sec"})  # Normalize by p95 to get relative anomaly score
 
         return {
-            "final_score": float(np.mean(scores)),
+            "final_score": float(np.mean([s["score"] for s in scores])),
             "chunk_scores": scores
         }
 
@@ -566,7 +566,7 @@ if __name__ == "__main__":
         for f in glob.glob(os.path.join(args.train_dir, "*.wav")):
             audio = embedder.load_audio(f)
             result = detector.evaluate(audio, p95=1.0)  # Use p95=1.0 for training data to get raw anomaly scores
-            train_scores.extend(result["chunk_scores"])
+            train_scores.extend([s["score"] for s in result["chunk_scores"]])
 
         mean_score = np.mean(train_scores)
         std_score = np.std(train_scores)
@@ -605,9 +605,6 @@ if __name__ == "__main__":
             print(f"Duration: {result['audio_duration']:.2f} seconds")
             print(f"Final Quality Score: {result['final_score']:.4f}")
             print(f"Number of Chunks: {len(result['chunk_scores'])}")
-            print(f"Chunk Scores: {[f'{score:.4f}' for score in result['chunk_scores'][:5]]}")
-            if len(result['chunk_scores']) > 5:
-                print(f"  ... and {len(result['chunk_scores']) - 5} more chunks")
             print(f"Models Loaded: {result['model_status']}")
             
             # Save to JSON if requested
@@ -622,7 +619,7 @@ if __name__ == "__main__":
                 }
                 with open(args.output, 'w') as f:
                     json.dump(output_data, f, indent=2)
-                print(f"\n✓ Results saved to: {args.output}")
+                print(f"\nResults saved to: {args.output}")
             
         except FileNotFoundError as e:
             print(f"ERROR: {e}")
