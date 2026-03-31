@@ -44,10 +44,6 @@ class Wav2Vec2Embedder:
         """
         waveform, sr = librosa.load(path, sr=16000)
         return waveform
-        # waveform, sr = torchaudio.load(path)
-        # if sr != 16000:
-        #     waveform: torch.Tensor = torchaudio.functional.resample(waveform, sr, 16000)
-        # return waveform.squeeze().numpy()
 
     def get_embedding(self, audio: ndarray) -> ndarray:
         """Generates embedding from audio using Wav2Vec2 model.
@@ -331,12 +327,13 @@ class AudioQualityDetector:
         loss: float = torch.mean((spec_tensor - recon) ** 2).item()
         return loss
 
-    def evaluate(self, audio: ndarray) -> Dict[str, Any]:
+    def evaluate(self, audio: ndarray, p95: float) -> Dict[str, Any]:
         """Evaluates audio quality by analyzing chunks.
         
         Args:
             audio (ndarray): Audio waveform array.
-            
+            p95 (float): 95th percentile threshold for anomaly detection.
+        
         Returns:
             Dict[str, Any]: Dictionary with 'final_score' (float) and 'chunk_scores' (List[float]).
         """
@@ -354,7 +351,7 @@ class AudioQualityDetector:
                 ae = self.ae_score(c)
 
             final: float = 0.6 * anom + 0.3 * sig + 0.1 * ae
-            scores.append(final)
+            scores.append(final/p95)  # Normalize by p95 to get relative anomaly score
 
         return {
             "final_score": float(np.mean(scores)),
@@ -478,14 +475,19 @@ def test_audio(audio_path: str, device: str = "cpu") -> Dict[str, Any]:
     
     # Create detector
     detector: AudioQualityDetector = AudioQualityDetector(embedder, normal_model, ae_model, device=device)
+
     
+    stats = np.load("norm_stats.npy", allow_pickle=True).item()
+    p95 = stats["p95"]
+
     # Load and evaluate audio
     print("Loading audio...")
     audio: ndarray = embedder.load_audio(audio_path)
     
     print("Evaluating audio quality...")
-    result: Dict[str, Any] = detector.evaluate(audio)
+    result: Dict[str, Any] = detector.evaluate(audio, p95=p95)
     
+
     # Add metadata
     result['audio_file'] = audio_path
     result['audio_duration'] = len(audio) / 16000.0  # duration in seconds
@@ -556,6 +558,31 @@ if __name__ == "__main__":
         print("\n✓ Models trained and saved successfully!")
         print(f"  - Normal model: models/normal_model.pkl")
         print(f"  - Autoencoder: models/autoencoder.pt")
+
+        print("\nCalculating normalization statistics from training data...")
+        # Create detector
+        detector: AudioQualityDetector = AudioQualityDetector(embedder, normal_model, ae_model, device=device)
+        train_scores = []
+        for f in glob.glob(os.path.join(args.train_dir, "*.wav")):
+            audio = embedder.load_audio(f)
+            result = detector.evaluate(audio, p95=1.0)  # Use p95=1.0 for training data to get raw anomaly scores
+            train_scores.extend(result["chunk_scores"])
+
+        mean_score = np.mean(train_scores)
+        std_score = np.std(train_scores)
+        p95 = np.percentile(train_scores, 95)
+        p99 = np.percentile(train_scores, 99)
+
+        print("Mean:", mean_score)
+        print("Std:", std_score)
+        print("P95:", p95)
+        print("P99:", p99)
+
+        np.save("norm_stats.npy", {
+            "p95": p95,
+            "mean": mean_score,
+            "std": std_score
+        })
         
     elif args.mode == 'test':
         print("\n" + "="*50)
