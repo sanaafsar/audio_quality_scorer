@@ -476,8 +476,8 @@ def test_audio(audio_path: str, device: str = "cpu") -> Dict[str, Any]:
     # Create detector
     detector: AudioQualityDetector = AudioQualityDetector(embedder, normal_model, ae_model, device=device)
 
-    
-    stats = np.load("norm_stats.npy", allow_pickle=True).item()
+    norm_stats_path = os.path.join(MODELS_DIR, "norm_stats.npy")
+    stats = np.load(norm_stats_path, allow_pickle=True).item()
     p95 = stats["p95"]
 
     # Load and evaluate audio
@@ -578,7 +578,8 @@ if __name__ == "__main__":
         print("P95:", p95)
         print("P99:", p99)
 
-        np.save("norm_stats.npy", {
+        norm_stats_path = os.path.join(MODELS_DIR, "norm_stats.npy")
+        np.save(norm_stats_path, {
             "p95": p95,
             "mean": mean_score,
             "std": std_score
