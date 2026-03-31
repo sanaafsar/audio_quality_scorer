@@ -167,7 +167,7 @@ def run_pipeline(youtube_urls=[]):
         
     Prints total number of clean chunks created upon completion.
     """
-    #download_librispeech()
+    download_librispeech()
 
     if youtube_urls:
         download_youtube(youtube_urls)
