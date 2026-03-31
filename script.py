@@ -7,6 +7,8 @@ import os
 import glob
 import librosa
 import pickle
+import argparse
+import json
 from typing import Any, Dict, List, Tuple, Optional
 from numpy import ndarray
 
@@ -436,25 +438,167 @@ def train_autoencoder(audio_folder: str, device: str = "cpu", epochs: int = 5) -
 
 
 # =========================
+# TEST FUNCTION
+# =========================
+def test_audio(audio_path: str, device: str = "cpu") -> Dict[str, Any]:
+    """Tests audio quality using saved models.
+    
+    Loads pre-trained models from disk and evaluates the audio quality of the
+    provided audio file.
+    
+    Args:
+        audio_path (str): Path to the audio file to test (.wav or .flac).
+        device (str): Device for inference ('cpu' or 'cuda'). Defaults to 'cpu'.
+        
+    Returns:
+        Dict[str, Any]: Dictionary containing:
+            - 'final_score': Overall quality score
+            - 'chunk_scores': Per-chunk quality scores
+            - 'model_status': Status of model loading
+            
+    Raises:
+        FileNotFoundError: If audio file or model files are not found.
+    """
+    print(f"Testing audio file: {audio_path}")
+    
+    # Check if audio file exists
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    
+    # Load models
+    print("Loading saved models...")
+    normal_model: Optional[NormalModel] = load_normal_model()
+    ae_model: Optional[SpectrogramAutoencoder] = load_autoencoder(device=device)
+    
+    if normal_model is None:
+        raise FileNotFoundError("Normal model not found. Please train the model first using train mode.")
+    
+    # Initialize embedder
+    embedder: Wav2Vec2Embedder = Wav2Vec2Embedder(device=device)
+    
+    # Create detector
+    detector: AudioQualityDetector = AudioQualityDetector(embedder, normal_model, ae_model, device=device)
+    
+    # Load and evaluate audio
+    print("Loading audio...")
+    audio: ndarray = embedder.load_audio(audio_path)
+    
+    print("Evaluating audio quality...")
+    result: Dict[str, Any] = detector.evaluate(audio)
+    
+    # Add metadata
+    result['audio_file'] = audio_path
+    result['audio_duration'] = len(audio) / 16000.0  # duration in seconds
+    result['model_status'] = {
+        'normal_model_loaded': True,
+        'autoencoder_loaded': ae_model is not None
+    }
+    
+    return result
+
+
+# =========================
 # MAIN
 # =========================
 if __name__ == "__main__":
-    DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {DEVICE}")
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(
+        description="Audio Quality Detection System - Train embeddings or test audio files"
+    )
+    parser.add_argument(
+        'mode',
+        choices=['train', 'test'],
+        help='Mode: train to train models, test to evaluate audio file'
+    )
+    parser.add_argument(
+        '--audio',
+        type=str,
+        help='Path to audio file for testing (required in test mode)'
+    )
+    parser.add_argument(
+        '--train-dir',
+        type=str,
+        default='data/train',
+        help='Directory with training audio files (default: data/train)'
+    )
+    parser.add_argument(
+        '--device',
+        type=str,
+        choices=['cpu', 'cuda'],
+        help='Device to use (cpu or cuda). Auto-detected if not specified.'
+    )
+    parser.add_argument(
+        '--output',
+        type=str,
+        help='Save test results to JSON file'
+    )
+    
+    args: argparse.Namespace = parser.parse_args()
+    
+    # Auto-detect device if not specified
+    device: str = args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    if args.mode == 'train':
+        print("\n" + "="*50)
+        print("TRAINING MODE")
+        print("="*50)
+        
+        print("Training embedding model...")
+        embedder: Wav2Vec2Embedder
+        normal_model: NormalModel
+        embedder, normal_model = train_embedding_model(args.train_dir)
+        save_normal_model(normal_model)
 
-    print("Training embedding model...")
-    embedder: Wav2Vec2Embedder
-    normal_model: NormalModel
-    embedder, normal_model = train_embedding_model("data/train")
-    save_normal_model(normal_model)
-
-    print("Training autoencoder...")
-    ae_model: SpectrogramAutoencoder = train_autoencoder("data/train", device=DEVICE)
-    save_autoencoder(ae_model)
-
-    detector: AudioQualityDetector = AudioQualityDetector(embedder, normal_model, ae_model, device=DEVICE)
-
-    audio: ndarray = embedder.load_audio("data/test/Believer.wav")
-    result: Dict[str, Any] = detector.evaluate(audio)
-
-    print("RESULT:", result)
+        print("\nTraining autoencoder...")
+        ae_model: SpectrogramAutoencoder = train_autoencoder(args.train_dir, device=device)
+        save_autoencoder(ae_model)
+        
+        print("\n✓ Models trained and saved successfully!")
+        print(f"  - Normal model: models/normal_model.pkl")
+        print(f"  - Autoencoder: models/autoencoder.pt")
+        
+    elif args.mode == 'test':
+        print("\n" + "="*50)
+        print("TEST MODE")
+        print("="*50)
+        
+        if not args.audio:
+            print("ERROR: --audio argument required in test mode")
+            parser.print_help()
+            exit(1)
+        
+        try:
+            result: Dict[str, Any] = test_audio(args.audio, device=device)
+            
+            print("\n" + "-"*50)
+            print("EVALUATION RESULTS")
+            print("-"*50)
+            print(f"Audio File: {result['audio_file']}")
+            print(f"Duration: {result['audio_duration']:.2f} seconds")
+            print(f"Final Quality Score: {result['final_score']:.4f}")
+            print(f"Number of Chunks: {len(result['chunk_scores'])}")
+            print(f"Chunk Scores: {[f'{score:.4f}' for score in result['chunk_scores'][:5]]}")
+            if len(result['chunk_scores']) > 5:
+                print(f"  ... and {len(result['chunk_scores']) - 5} more chunks")
+            print(f"Models Loaded: {result['model_status']}")
+            
+            # Save to JSON if requested
+            if args.output:
+                output_data: Dict[str, Any] = {
+                    'audio_file': result['audio_file'],
+                    'duration_seconds': result['audio_duration'],
+                    'final_score': result['final_score'],
+                    'num_chunks': len(result['chunk_scores']),
+                    'chunk_scores': result['chunk_scores'],
+                    'model_status': result['model_status']
+                }
+                with open(args.output, 'w') as f:
+                    json.dump(output_data, f, indent=2)
+                print(f"\n✓ Results saved to: {args.output}")
+            
+        except FileNotFoundError as e:
+            print(f"ERROR: {e}")
+            exit(1)
+        except Exception as e:
+            print(f"ERROR: {type(e).__name__}: {e}")
+            exit(1)
