@@ -3,12 +3,13 @@
 
 import torch
 import torch.nn as nn
-import torchaudio
+# import torchaudio
 import numpy as np
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
 import os
 import glob
 import librosa
+import pickle
 from typing import Any, Dict, List, Tuple, Optional
 from numpy import ndarray
 
@@ -42,10 +43,12 @@ class Wav2Vec2Embedder:
         Returns:
             ndarray: Audio waveform as numpy array with shape (samples,).
         """
-        waveform, sr = torchaudio.load(path)
-        if sr != 16000:
-            waveform: torch.Tensor = torchaudio.functional.resample(waveform, sr, 16000)
-        return waveform.squeeze().numpy()
+        waveform, sr = librosa.load(path, sr=16000)
+        return waveform
+        # waveform, sr = torchaudio.load(path)
+        # if sr != 16000:
+        #     waveform: torch.Tensor = torchaudio.functional.resample(waveform, sr, 16000)
+        # return waveform.squeeze().numpy()
 
     def get_embedding(self, audio: ndarray) -> ndarray:
         """Generates embedding from audio using Wav2Vec2 model.
@@ -192,6 +195,79 @@ def signal_score(f: Dict[str, Any]) -> float:
         score += 0.5
     return score
 
+
+# =========================
+# MODEL PERSISTENCE
+# =========================
+MODELS_DIR: str = "models"
+
+def ensure_models_dir() -> None:
+    """Creates models directory if it doesn't exist."""
+    os.makedirs(MODELS_DIR, exist_ok=True)
+
+def save_normal_model(model: 'NormalModel', filename: str = "normal_model.pkl") -> None:
+    """Saves the normal model (mean and covariance inverse) to disk.
+    
+    Args:
+        model (NormalModel): Trained normal model to save.
+        filename (str): Output filename. Defaults to 'normal_model.pkl'.
+    """
+    ensure_models_dir()
+    filepath: str = os.path.join(MODELS_DIR, filename)
+    with open(filepath, 'wb') as f:
+        pickle.dump({'mean': model.mean, 'cov_inv': model.cov_inv}, f)
+    print(f"Normal model saved to {filepath}")
+
+def load_normal_model(filename: str = "normal_model.pkl") -> Optional['NormalModel']:
+    """Loads a normal model from disk.
+    
+    Args:
+        filename (str): Input filename. Defaults to 'normal_model.pkl'.
+        
+    Returns:
+        Optional[NormalModel]: Loaded model or None if file not found.
+    """
+    filepath: str = os.path.join(MODELS_DIR, filename)
+    if not os.path.exists(filepath):
+        return None
+    with open(filepath, 'rb') as f:
+        data = pickle.load(f)
+    model: NormalModel = NormalModel()
+    model.mean = data['mean']
+    model.cov_inv = data['cov_inv']
+    print(f"Normal model loaded from {filepath}")
+    return model
+
+def save_autoencoder(model: SpectrogramAutoencoder, filename: str = "autoencoder.pt") -> None:
+    """Saves the autoencoder model to disk.
+    
+    Args:
+        model (SpectrogramAutoencoder): Trained autoencoder model to save.
+        filename (str): Output filename. Defaults to 'autoencoder.pt'.
+    """
+    ensure_models_dir()
+    filepath: str = os.path.join(MODELS_DIR, filename)
+    torch.save(model.state_dict(), filepath)
+    print(f"Autoencoder model saved to {filepath}")
+
+def load_autoencoder(device: str = "cpu", filename: str = "autoencoder.pt") -> Optional[SpectrogramAutoencoder]:
+    """Loads an autoencoder model from disk.
+    
+    Args:
+        device (str): Device to load model on. Defaults to 'cpu'.
+        filename (str): Input filename. Defaults to 'autoencoder.pt'.
+        
+    Returns:
+        Optional[SpectrogramAutoencoder]: Loaded model or None if file not found.
+    """
+    filepath: str = os.path.join(MODELS_DIR, filename)
+    if not os.path.exists(filepath):
+        return None
+    model: SpectrogramAutoencoder = SpectrogramAutoencoder().to(device)
+    model.load_state_dict(torch.load(filepath, map_location=device))
+    model.eval()
+    print(f"Autoencoder model loaded from {filepath}")
+    return model
 
 # =========================
 # CHUNKING
@@ -357,7 +433,7 @@ def train_autoencoder(audio_folder: str, device: str = "cpu", epochs: int = 5) -
 
             total_loss += int(loss.item())
 
-        print(f"Epoch {epoch+1}, Loss: {total_loss:.4f}")
+            print(f"Epoch {epoch+1}, Loss: {total_loss:.4f}")
 
     return model
 
@@ -366,19 +442,22 @@ def train_autoencoder(audio_folder: str, device: str = "cpu", epochs: int = 5) -
 # MAIN
 # =========================
 if __name__ == "__main__":
-    DEVICE: str = "cpu"
+    DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {DEVICE}")
 
     print("Training embedding model...")
     embedder: Wav2Vec2Embedder
     normal_model: NormalModel
     embedder, normal_model = train_embedding_model("data/train")
+    save_normal_model(normal_model)
 
     print("Training autoencoder...")
     ae_model: SpectrogramAutoencoder = train_autoencoder("data/train", device=DEVICE)
+    save_autoencoder(ae_model)
 
     detector: AudioQualityDetector = AudioQualityDetector(embedder, normal_model, ae_model, device=DEVICE)
 
-    audio: ndarray = embedder.load_audio("data/test/test.wav")
+    audio: ndarray = embedder.load_audio("data/test/Believer.wav")
     result: Dict[str, Any] = detector.evaluate(audio)
 
     print("RESULT:", result)
