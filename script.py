@@ -1,9 +1,6 @@
 
-# audio_quality_system_v2.py
-
 import torch
 import torch.nn as nn
-# import torchaudio
 import numpy as np
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
 import os
