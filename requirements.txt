@@ -19,7 +19,8 @@ scipy==1.10.1
 yt-dlp==2024.3.10
 
 # VAD
-webrtcvad==2.0.10
+# webrtcvad==2.0.10
+webrtcvad-wheels==2.0.14
 
 # Utils
 tqdm==4.66.1
