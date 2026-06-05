@@ -11,6 +11,9 @@ import librosa
 import numpy as np
 import soundfile as sf
 from glob import glob
+import imageio_ffmpeg
+from pytubefix import YouTube
+from pytubefix.cli import on_progress
 import webrtcvad
 
 SR = 16000
@@ -33,24 +36,48 @@ def download_librispeech():
     subprocess.run(["wget", url, "-P", RAW_DIR])
     subprocess.run(["tar", "-xvf", f"{RAW_DIR}/dev-clean.tar.gz", "-C", RAW_DIR])
 
+FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
+
 def download_youtube(urls):
-    """Downloads audio from YouTube URLs using yt-dlp.
-    
+    """Downloads audio from YouTube URLs using pytubefix with OAuth.
+
+    On the first run this will print a Google device-auth URL and a short code.
+    Open that URL in your browser, enter the code, then press Enter here.
+    The OAuth token is cached locally so subsequent runs are fully automatic.
+
     Args:
         urls (list): List of YouTube video URLs to download.
-        
-    Downloads the best available audio quality and converts to WAV format
-    in the RAW_DIR directory.
+
+    Downloads audio-only streams and converts them to WAV files in RAW_DIR.
+    Skips unavailable videos and reports per-URL errors.
     """
     for url in urls:
-        subprocess.run([
-            "yt-dlp",
-            "-f", "bestaudio",
-            "-x",
-            "--audio-format", "wav",
-            "-o", f"{RAW_DIR}/%(title)s.%(ext)s",
-            url
-        ])
+        print(f"Downloading: {url}")
+        try:
+            yt = YouTube(url, use_oauth=True, allow_oauth_cache=True,
+                         on_progress_callback=on_progress)
+            stream = yt.streams.get_audio_only()
+            if stream is None:
+                print(f"  No audio stream found for {url}, skipping.")
+                continue
+
+            safe_title = "".join(c if c.isalnum() or c in " _-" else "_" for c in yt.title)
+            tmp_path = os.path.join(RAW_DIR, f"{safe_title}.{stream.subtype}")
+            wav_path = os.path.join(RAW_DIR, f"{safe_title}.wav")
+
+            if os.path.exists(wav_path):
+                print(f"  Already exists: {wav_path}, skipping.")
+                continue
+
+            stream.download(output_path=RAW_DIR, filename=f"{safe_title}.{stream.subtype}")
+            subprocess.run(
+                [FFMPEG, "-y", "-i", tmp_path, "-ar", str(SR), "-ac", "1", wav_path],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            os.remove(tmp_path)
+            print(f"  Saved: {wav_path}")
+        except Exception as e:
+            print(f"  Failed: {url} — {e}")
 
 def chunk_audio(audio):
     """Splits audio into fixed-length non-overlapping chunks.
@@ -191,23 +218,23 @@ if __name__ == "__main__":
     "https://www.youtube.com/watch?v=U6oJxS0Q0lU",
     "https://www.youtube.com/watch?v=Y7G5CKX0je0",
     "https://www.youtube.com/watch?v=5qap5aO4i9A",
-    "https://www.youtube.com/watch?v=2OEL4P1Rz04"
-  
+    "https://www.youtube.com/watch?v=2OEL4P1Rz04",
+
     "https://www.youtube.com/watch?v=Jtq1p7ZCkbs",
     "https://www.youtube.com/watch?v=8lZzJ2g5y9M",
     "https://www.youtube.com/watch?v=6ZfuNTqbHE8",
     "https://www.youtube.com/watch?v=9bZkp7q19f0",
-    "https://www.youtube.com/watch?v=3GwjfUFyY6M"
+    "https://www.youtube.com/watch?v=3GwjfUFyY6M",
 
     "https://www.youtube.com/watch?v=9Auq9mYxFEE",
     "https://www.youtube.com/watch?v=frW4G6u7k6E",
     "https://www.youtube.com/watch?v=Z1BCujX3pw8",
-    "https://www.youtube.com/watch?v=VYOjWnS4cMY"
+    "https://www.youtube.com/watch?v=VYOjWnS4cMY",
 
     "https://www.youtube.com/watch?v=0JdJe8g5k6A",
     "https://www.youtube.com/watch?v=7Xf-Lesrkuc",
-    "https://www.youtube.com/watch?v=JGwWNGJdvx8"
-  
+    "https://www.youtube.com/watch?v=JGwWNGJdvx8",
+    
     "https://www.youtube.com/watch?v=HhjHYkPQ8F0",
     "https://www.youtube.com/watch?v=Kx7B-XvmFtE"
     ]
