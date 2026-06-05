@@ -5,6 +5,7 @@ import numpy as np
 from transformers import Wav2Vec2Model, Wav2Vec2Processor
 import os
 import glob
+from pathlib import Path
 import librosa
 import pickle
 import argparse
@@ -29,8 +30,18 @@ class Wav2Vec2Embedder:
             device (str): Device to run the model on ('cpu' or 'cuda'). Defaults to 'cpu'.
         """
         self.device: str = device
-        self.processor: Wav2Vec2Processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base")
-        self.model: Wav2Vec2Model = Wav2Vec2Model.from_pretrained("facebook/wav2vec2-base").to(device)
+               
+        # Cache directory: inside the model folder for portability
+        cache_dir = Path(__file__).parent / "cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        self.processor: Wav2Vec2Processor = Wav2Vec2Processor.from_pretrained(
+            "facebook/wav2vec2-base",
+            cache_dir=str(cache_dir),
+        )
+        self.model: Wav2Vec2Model = Wav2Vec2Model.from_pretrained(
+            "facebook/wav2vec2-base",
+            cache_dir=str(cache_dir),
+        ).to(device)
         self.model.eval()
 
     def load_audio(self, path: str) -> ndarray:
