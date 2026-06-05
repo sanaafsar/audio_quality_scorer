@@ -148,6 +148,7 @@ test_audio/
 *.h5
 *.model
 models/
+cache/
 
 # Data files
 *.csv
