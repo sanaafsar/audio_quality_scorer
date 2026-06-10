@@ -118,7 +118,8 @@ def is_speech(chunk):
     speech_frames = 0
     total_frames = 0
 
-    for i in range(0, len(pcm) - frame_size, frame_size):
+    # +1 so the final whole frame is included (range stop is exclusive).
+    for i in range(0, len(pcm) - frame_size + 1, frame_size):
         frame = pcm[i:i+frame_size]
         if vad.is_speech(frame, SR):
             speech_frames += 1

@@ -142,13 +142,31 @@ class NormalModel:
 
     def fit(self, embeddings: ndarray) -> None:
         """Fits the model to embeddings from good audio.
-        
+
+        Uses trace-relative shrinkage so the inverse covariance stays
+        well-conditioned even when the number of samples is not comfortably
+        larger than the embedding dimension (otherwise the sample covariance is
+        rank-deficient and ``cov_inv`` is numerically meaningless).
+
         Args:
             embeddings (ndarray): Array of embeddings with shape (n_samples, embedding_dim).
         """
+        n_samples, dim = embeddings.shape
+        if n_samples <= dim:
+            print(
+                f"WARNING: NormalModel fit on {n_samples} samples for {dim}-dim "
+                f"embeddings (n <= dim); covariance is rank-deficient and the "
+                f"Mahalanobis anomaly score may be unreliable. Use more training audio."
+            )
+
         self.mean = np.mean(embeddings, axis=0)
         cov = np.cov(embeddings, rowvar=False)
-        cov += np.eye(cov.shape[0]) * 1e-6
+        # Shrink toward a scaled identity: lambda * (trace(cov) / dim) * I.
+        # This is scale-aware (unlike a fixed 1e-6 ridge) and guarantees a
+        # positive-definite, invertible matrix.
+        shrinkage = 1e-3
+        ridge = shrinkage * (np.trace(cov) / dim)
+        cov += np.eye(dim) * ridge
         self.cov_inv = np.linalg.inv(cov)
 
     def score(self, x: ndarray) -> float:
@@ -442,6 +460,12 @@ def train_embedding_model(audio_folder: str) -> Tuple[Wav2Vec2Embedder, NormalMo
             emb: ndarray = embedder.get_embedding(c)
             embeddings.append(emb)
 
+    if not embeddings:
+        raise ValueError(
+            f"No training embeddings produced from '{audio_folder}'. Ensure it "
+            f"contains .wav files at least {3}s long (shorter clips yield no chunks)."
+        )
+
     model: NormalModel = NormalModel()
     model.fit(np.array(embeddings))
 
@@ -536,6 +560,11 @@ def test_audio(audio_path: str, device: str = "cpu") -> Dict[str, Any]:
     detector: AudioQualityDetector = AudioQualityDetector(embedder, normal_model, ae_model, device=device)
 
     norm_stats_path = os.path.join(MODELS_DIR, "norm_stats.npy")
+    if not os.path.exists(norm_stats_path):
+        raise FileNotFoundError(
+            "Normalization stats (norm_stats.npy) not found. Please train the model "
+            "first using train mode."
+        )
     stats = np.load(norm_stats_path, allow_pickle=True).item()
 
     # Load and evaluate audio
@@ -634,9 +663,12 @@ if __name__ == "__main__":
                 ae_raw.append(ae)
 
         def _mean_std(values: List[float]) -> Tuple[float, float]:
-            """Returns (mean, std) with std floored to 1.0 to avoid divide-by-zero."""
+            """Returns (mean, sample-std) with std floored to 1.0 to avoid divide-by-zero.
+
+            Uses ddof=1 (sample std) for consistency with ``np.cov`` in NormalModel.
+            """
             arr = np.asarray(values, dtype=np.float64)
-            std = float(arr.std())
+            std = float(arr.std(ddof=1)) if arr.size > 1 else 0.0
             return float(arr.mean()), std if std > 1e-12 else 1.0
 
         anom_mean, anom_std = _mean_std(anom_raw)
