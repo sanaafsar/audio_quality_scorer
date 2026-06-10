@@ -25,12 +25,18 @@ vad = webrtcvad.Vad(2)  # aggressiveness: 0-3
 
 def download_librispeech():
     """Downloads and extracts LibriSpeech dev-clean dataset.
-    
+
     Retrieves the LibriSpeech dev-clean data (approximately 5.4 hours of audio)
-    from OpenSLR servers and extracts it to RAW_DIR.
+    from OpenSLR servers and extracts it to RAW_DIR. Skips the ~330 MB download
+    and extraction if the dataset is already present.
     """
+    extracted_dir = os.path.join(RAW_DIR, "LibriSpeech")
+    if os.path.isdir(extracted_dir):
+        print(f"LibriSpeech already present at {extracted_dir}, skipping download.")
+        return
+
     url = "https://www.openslr.org/resources/12/dev-clean.tar.gz"
-    subprocess.run(["wget", url, "-P", RAW_DIR])
+    subprocess.run(["wget", "-c", url, "-P", RAW_DIR])
     subprocess.run(["tar", "-xvf", f"{RAW_DIR}/dev-clean.tar.gz", "-C", RAW_DIR])
 
 FFMPEG = imageio_ffmpeg.get_ffmpeg_exe()
@@ -103,8 +109,9 @@ def is_speech(chunk):
         
     Uses WebRTC Voice Activity Detection with 30ms frames for robust speech detection.
     """
-    # VAD expects 16-bit PCM
-    pcm = (chunk * 32768).astype(np.int16).tobytes()
+    # VAD expects 16-bit PCM. Clip to [-1, 1) and scale by 32767 so a
+    # full-scale +1.0 sample does not overflow int16 to -32768.
+    pcm = (np.clip(chunk, -1.0, 1.0) * 32767).astype(np.int16).tobytes()
     frame_duration = 30  # ms
     frame_size = int(SR * frame_duration / 1000) * 2
 

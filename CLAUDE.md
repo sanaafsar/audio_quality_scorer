@@ -86,15 +86,6 @@ VAD (`is_speech`) and signal-quality checks (`is_good_chunk`). Clean chunks land
 - Models must be trained before `test` mode works — it raises `FileNotFoundError`
   if `models/normal_model.pkl` or `norm_stats.npy` is missing.
 
-## Known rough edges (verify before relying on them)
-
-- `prepare_data.py:is_speech` converts to int16 with `chunk * 32768`; a full-scale
-  `+1.0` sample overflows to `-32768` (should be `32767`). Affects at most a few
-  samples — harmless in practice but technically wrong.
-- `run_pipeline` calls `download_librispeech()` unconditionally with a plain `wget`
-  (no `-nc`/`--continue`), re-downloading ~330 MB every run. Gate on whether
-  `raw_audio/LibriSpeech` already exists if this becomes annoying.
-
 ## Style
 
 Match the existing code: type hints on signatures, Google-style docstrings, and
