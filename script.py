@@ -307,7 +307,10 @@ class AudioQualityDetector:
     Combines embedding-based anomaly detection, signal features, and spectrogram
     reconstruction error to assess audio quality.
     """
-    
+
+    # Weights for (anom, sig, ae) applied AFTER each component is standardized.
+    WEIGHTS: Tuple[float, float, float] = (0.6, 0.3, 0.1)
+
     def __init__(self, embedder: Wav2Vec2Embedder, normal_model: 'NormalModel', ae_model: Optional['SpectrogramAutoencoder'] = None, device: str = "cpu") -> None:
         """Initializes the audio quality detector.
         
@@ -338,31 +341,75 @@ class AudioQualityDetector:
         loss: float = torch.mean((spec_tensor - recon) ** 2).item()
         return loss
 
-    def evaluate(self, audio: ndarray, p95: float) -> Dict[str, Any]:
+    def chunk_components(self, c: ndarray) -> Tuple[float, float, float]:
+        """Computes the three raw quality components for a single chunk.
+
+        Args:
+            c (ndarray): A single fixed-length audio chunk.
+
+        Returns:
+            Tuple[float, float, float]: Raw (anom, sig, ae) components, where
+                anom is the Mahalanobis embedding anomaly, sig is the signal
+                heuristic score, and ae is the autoencoder reconstruction error
+                (0.0 when no autoencoder is loaded).
+        """
+        sig: float = signal_score(compute_signal_features(c))
+        emb = self.embedder.get_embedding(c)
+        anom: float = self.normal_model.score(emb)
+        ae: float = self.ae_score(c) if self.ae_model else 0.0
+        return anom, sig, ae
+
+    def combine(self, anom: float, sig: float, ae: float, stats: Dict[str, Any]) -> float:
+        """Combines raw components into a single standardized quality score.
+
+        Each component is z-scored against its training-set mean/std so the
+        WEIGHTS express intended importance rather than being dominated by the
+        component with the largest raw scale (the embedding anomaly).
+
+        Args:
+            anom (float): Raw Mahalanobis embedding anomaly.
+            sig (float): Raw signal heuristic score.
+            ae (float): Raw autoencoder reconstruction error.
+            stats (Dict[str, Any]): Normalization statistics containing per-component
+                '<name>_mean' and '<name>_std' for 'anom', 'sig', 'ae'.
+
+        Returns:
+            float: Weighted, standardized score (NOT yet divided by p95).
+        """
+        z_anom = (anom - stats["anom_mean"]) / stats["anom_std"]
+        z_sig = (sig - stats["sig_mean"]) / stats["sig_std"]
+        z_ae = (ae - stats["ae_mean"]) / stats["ae_std"]
+        return float(self.WEIGHTS[0] * z_anom + self.WEIGHTS[1] * z_sig + self.WEIGHTS[2] * z_ae)
+
+    def evaluate(self, audio: ndarray, stats: Dict[str, Any]) -> Dict[str, Any]:
         """Evaluates audio quality by analyzing chunks.
-        
+
         Args:
             audio (ndarray): Audio waveform array.
-            p95 (float): 95th percentile threshold for anomaly detection.
-        
+            stats (Dict[str, Any]): Normalization statistics with per-component
+                mean/std (see ``combine``) and 'p95', the 95th-percentile of the
+                combined training score used to scale the output to ~1.0.
+
         Returns:
             Dict[str, Any]: Dictionary with 'final_score' (float) and 'chunk_scores' (List[Dict[str, Any]]).
         """
         chunks = chunk_audio(audio)
 
-        scores: List[float] = []
+        if not chunks:
+            # Audio is shorter than a single 3s chunk; nothing to score.
+            return {
+                "final_score": 0.0,
+                "chunk_scores": [],
+                "warning": "audio shorter than one 3s chunk; no chunks evaluated",
+            }
+
+        scores: List[Dict[str, Any]] = []
 
         for i, c in enumerate(chunks):
-            sig: float = signal_score(compute_signal_features(c))
-            emb = self.embedder.get_embedding(c)
-            anom = self.normal_model.score(emb)
-
-            ae: float = 0.0
-            if self.ae_model:
-                ae = self.ae_score(c)
-
-            final: float = 0.6 * anom + 0.3 * sig + 0.1 * ae
-            scores.append({"score": final / p95, "time": str(i*3)+" sec"})  # Normalize by p95 to get relative anomaly score
+            anom, sig, ae = self.chunk_components(c)
+            final: float = self.combine(anom, sig, ae, stats)
+            # Normalize by p95 to get a relative score (~1.0 ≈ edge of normal).
+            scores.append({"score": final / stats["p95"], "time": str(i * 3) + " sec"})
 
         return {
             "final_score": float(np.mean([s["score"] for s in scores])),
@@ -428,7 +475,7 @@ def train_autoencoder(audio_folder: str, device: str = "cpu", epochs: int = 5) -
             data.append(spec)
 
     for epoch in range(epochs):
-        total_loss: int = 0
+        total_loss: float = 0.0
         for spec in data:
             spec_tensor: torch.Tensor = torch.tensor(spec, dtype=torch.float32).to(device)
             recon: torch.Tensor = model(spec_tensor)
@@ -438,9 +485,10 @@ def train_autoencoder(audio_folder: str, device: str = "cpu", epochs: int = 5) -
             loss.backward()
             optimizer.step()
 
-            total_loss += int(loss.item())
+            total_loss += loss.item()
 
-            print(f"Epoch {epoch+1}, Loss: {total_loss:.4f}")
+        mean_loss: float = total_loss / len(data) if data else 0.0
+        print(f"Epoch {epoch+1}, Loss: {mean_loss:.4f}")
 
     return model
 
@@ -489,14 +537,13 @@ def test_audio(audio_path: str, device: str = "cpu") -> Dict[str, Any]:
 
     norm_stats_path = os.path.join(MODELS_DIR, "norm_stats.npy")
     stats = np.load(norm_stats_path, allow_pickle=True).item()
-    p95 = stats["p95"]
 
     # Load and evaluate audio
     print("Loading audio...")
     audio: ndarray = embedder.load_audio(audio_path)
-    
+
     print("Evaluating audio quality...")
-    result: Dict[str, Any] = detector.evaluate(audio, p95=p95)
+    result: Dict[str, Any] = detector.evaluate(audio, stats=stats)
     
 
     # Add metadata
@@ -573,27 +620,61 @@ if __name__ == "__main__":
         print("\nCalculating normalization statistics from training data...")
         # Create detector
         detector: AudioQualityDetector = AudioQualityDetector(embedder, normal_model, ae_model, device=device)
-        train_scores = []
+
+        # Pass 1: collect the RAW per-component values over every training chunk.
+        anom_raw: List[float] = []
+        sig_raw: List[float] = []
+        ae_raw: List[float] = []
         for f in glob.glob(os.path.join(args.train_dir, "*.wav")):
             audio = embedder.load_audio(f)
-            result = detector.evaluate(audio, p95=1.0)  # Use p95=1.0 for training data to get raw anomaly scores
-            train_scores.extend([s["score"] for s in result["chunk_scores"]])
+            for c in chunk_audio(audio):
+                anom, sig, ae = detector.chunk_components(c)
+                anom_raw.append(anom)
+                sig_raw.append(sig)
+                ae_raw.append(ae)
 
-        mean_score = np.mean(train_scores)
-        std_score = np.std(train_scores)
-        p95 = np.percentile(train_scores, 95)
-        p99 = np.percentile(train_scores, 99)
+        def _mean_std(values: List[float]) -> Tuple[float, float]:
+            """Returns (mean, std) with std floored to 1.0 to avoid divide-by-zero."""
+            arr = np.asarray(values, dtype=np.float64)
+            std = float(arr.std())
+            return float(arr.mean()), std if std > 1e-12 else 1.0
 
-        print("Mean:", mean_score)
-        print("Std:", std_score)
-        print("P95:", p95)
-        print("P99:", p99)
+        anom_mean, anom_std = _mean_std(anom_raw)
+        sig_mean, sig_std = _mean_std(sig_raw)
+        ae_mean, ae_std = _mean_std(ae_raw)
+
+        component_stats: Dict[str, Any] = {
+            "anom_mean": anom_mean, "anom_std": anom_std,
+            "sig_mean": sig_mean, "sig_std": sig_std,
+            "ae_mean": ae_mean, "ae_std": ae_std,
+        }
+
+        # Pass 2: standardize + weight each chunk, then derive the p95 used to
+        # scale test-time scores to the familiar ~1.0 range.
+        finals: List[float] = [
+            detector.combine(a, s, e, component_stats)
+            for a, s, e in zip(anom_raw, sig_raw, ae_raw)
+        ]
+        p95 = float(np.percentile(finals, 95))
+        p99 = float(np.percentile(finals, 99))
+
+        norm_scores = [fv / p95 for fv in finals]
+        mean_score = float(np.mean(norm_scores))
+        std_score = float(np.std(norm_scores))
+
+        print("Component means (anom, sig, ae):", anom_mean, sig_mean, ae_mean)
+        print("Component stds  (anom, sig, ae):", anom_std, sig_std, ae_std)
+        print("Mean (normalized):", mean_score)
+        print("Std  (normalized):", std_score)
+        print("P95 (combined):", p95)
+        print("P99 (combined):", p99)
 
         norm_stats_path = os.path.join(MODELS_DIR, "norm_stats.npy")
         np.save(norm_stats_path, {
             "p95": p95,
             "mean": mean_score,
-            "std": std_score
+            "std": std_score,
+            **component_stats,
         })
         
     elif args.mode == 'test':

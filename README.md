@@ -13,9 +13,13 @@ The system combines three complementary signals per audio chunk:
 3. **Spectrogram reconstruction error** — a mel-spectrogram autoencoder trained on
    clean speech; high reconstruction error flags unusual audio (weight `0.1`).
 
-Per-chunk scores are normalized by the 95th-percentile (`p95`) score of the
-training data so the output is a relative anomaly score (~1.0 ≈ the boundary of
-normal training audio).
+Because the three raw signals live on very different scales (the embedding anomaly
+is orders of magnitude larger than the others), each component is **standardized**
+(z-scored against per-component mean/std measured on the training set) *before* the
+weights are applied. This keeps the weights meaningful instead of letting the
+largest-scale component dominate. The standardized, weighted score is then
+normalized by the 95th-percentile (`p95`) of the training scores, so the output is
+a relative anomaly score (~1.0 ≈ the boundary of normal training audio).
 
 ## Project layout
 
@@ -31,7 +35,7 @@ audio_quality_scorer/
 ├── models/            # Saved models + normalization stats
 │   ├── normal_model.pkl   # Mahalanobis mean + inverse covariance
 │   ├── autoencoder.pt     # Spectrogram autoencoder weights
-│   └── norm_stats.npy     # {p95, mean, std} of training scores
+│   └── norm_stats.npy     # p95 + per-component (anom/sig/ae) mean & std
 ├── result/            # Saved JSON scoring outputs
 └── cache/             # Hugging Face model cache (created on first run)
 ```

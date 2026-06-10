@@ -21,9 +21,6 @@ CHUNK_SEC = 3
 OUTPUT_DIR = "dataset_clean"
 RAW_DIR = "raw_audio"
 
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(RAW_DIR, exist_ok=True)
-
 vad = webrtcvad.Vad(2)  # aggressiveness: 0-3
 
 def download_librispeech():
@@ -194,6 +191,9 @@ def run_pipeline(youtube_urls=[]):
         
     Prints total number of clean chunks created upon completion.
     """
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(RAW_DIR, exist_ok=True)
+
     download_librispeech()
 
     if youtube_urls:

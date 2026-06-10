@@ -34,13 +34,23 @@ Two scripts, no package structure.
 
 ### `script.py` — training + scoring
 
-The scoring pipeline combines three per-chunk signals into a weighted final score
-(`AudioQualityDetector.evaluate`):
+The scoring pipeline combines three per-chunk signals into a weighted final score.
+Each component is **z-scored against per-component training mean/std before
+weighting** so the weights are meaningful (the raw embedding anomaly is ~1000×
+larger than the signal score and would otherwise dominate):
 
 ```
-final = 0.6 * mahalanobis_anomaly + 0.3 * signal_score + 0.1 * ae_recon_error
-score = final / p95          # normalized by training p95
+# AudioQualityDetector.chunk_components -> raw (anom, sig, ae)
+# AudioQualityDetector.combine          -> standardize + weight
+z_x   = (x - stats["x_mean"]) / stats["x_std"]      for x in {anom, sig, ae}
+final = 0.6 * z_anom + 0.3 * z_sig + 0.1 * z_ae     # WEIGHTS class constant
+score = final / stats["p95"]                        # normalized by training p95
 ```
+
+`evaluate(audio, stats)` takes the full `norm_stats` dict (per-component mean/std +
+`p95`), not just `p95`. Per-component stats and `p95` are computed at train time in
+a two-pass loop in `__main__` (pass 1 collects raw components, pass 2 standardizes
+to derive `p95`).
 
 Key components:
 - `Wav2Vec2Embedder` — `facebook/wav2vec2-base` → 768-dim mean-pooled embedding per
@@ -50,8 +60,10 @@ Key components:
 - `SpectrogramAutoencoder` — small MLP autoencoder over 128-mel spectrograms;
   reconstruction MSE is the anomaly signal. Persisted as `models/autoencoder.pt`.
 - `compute_signal_features` / `signal_score` — clipping, RMS, silence heuristics.
-- `norm_stats.npy` — `{p95, mean, std}` of training scores, used to normalize at
-  test time.
+- `norm_stats.npy` — `{p95, mean, std, anom_mean, anom_std, sig_mean, sig_std,
+  ae_mean, ae_std}`. The per-component mean/std drive standardization; `p95`
+  rescales the final score. Must be regenerated (retrain) whenever the scoring
+  components or weights change.
 
 ### `prepare_data.py` — dataset construction
 
@@ -76,11 +88,12 @@ VAD (`is_speech`) and signal-quality checks (`is_good_chunk`). Clean chunks land
 
 ## Known rough edges (verify before relying on them)
 
-- `script.py` references `Path(...)` in `Wav2Vec2Embedder.__init__` but only
-  imports `os`/`glob`, not `pathlib.Path`. If you trigger that path, add
-  `from pathlib import Path`.
-- `train_autoencoder` accumulates `total_loss` with `int(loss.item())` and prints
-  inside the inner loop — loss reporting is coarse/noisy, not a correctness signal.
+- `prepare_data.py:is_speech` converts to int16 with `chunk * 32768`; a full-scale
+  `+1.0` sample overflows to `-32768` (should be `32767`). Affects at most a few
+  samples — harmless in practice but technically wrong.
+- `run_pipeline` calls `download_librispeech()` unconditionally with a plain `wget`
+  (no `-nc`/`--continue`), re-downloading ~330 MB every run. Gate on whether
+  `raw_audio/LibriSpeech` already exists if this becomes annoying.
 
 ## Style
 
