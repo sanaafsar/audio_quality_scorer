@@ -20,24 +20,44 @@ pip install -r requirements.txt
 python prepare_data.py            # writes chunks to dataset_clean/
 
 # Train (writes models/ artifacts)
-python script.py train --train-dir data/train
+python train.py --train-dir data/train
 
-# Score a file
-python script.py test --audio data/test/drunk.wav --output result/out.json
+# Score a file locally (inference test harness)
+python model.py --audio data/test/drunk.wav --output result/out.json
 ```
 
 There is no test suite, linter config, or build step in this repo.
 
 ## Architecture
 
-Two scripts, no package structure.
+Training and inference are **separate modules**; no package structure.
 
-### `script.py` — training + scoring
+- `base.py` — the `BaseQualityModel` ABC, copied from the downstream media-quality
+  pipeline (Chain-of-Responsibility). Defines the contract inference must satisfy:
+  `load()`, `predict(*args, **kwargs) -> ScoreDict`, `model_name`, `is_loaded`.
+  **Do not change it to fit this repo** — it mirrors the pipeline's interface.
+- `model.py` — inference + shared building blocks. Self-contained drop-in for the
+  pipeline (only needs `base.py` + the `models/` artifacts).
+- `train.py` — training entry point. Imports the building blocks from `model.py`.
+- `prepare_data.py` — dataset construction.
 
-The scoring pipeline combines three per-chunk signals into a weighted final score.
-Each component is **z-scored against per-component training mean/std before
-weighting** so the weights are meaningful (the raw embedding anomaly is ~1000×
-larger than the signal score and would otherwise dominate):
+### `model.py` — inference + shared core
+
+`AudioQualityModel(BaseQualityModel)` is the pipeline drop-in:
+- `predict(self, audio: np.ndarray, sample_rate: int = 16000) -> ScoreDict` —
+  narrows the base signature to a decoded waveform. Averages multi-channel to mono,
+  resamples to 16 kHz, scores, and returns `{overall, anomaly_score,
+  max_chunk_anomaly, num_chunks}` (all floats). `overall = 1/(1+max(anomaly,0))` in
+  `[0,1]` (1.0 = best) per the base convention; the raw fields keep "higher = worse".
+- `load()` reads `normal_model.pkl`, `autoencoder.pt` (optional), and
+  `norm_stats.npy` from `models_dir`; raises `FileNotFoundError` if the normal model
+  or stats are missing. `predict()` raises `RuntimeError` if called before `load()`.
+
+The scoring core `AudioQualityDetector` lives here and is reused by `train.py`, so
+training and inference cannot drift. It combines three per-chunk signals, each
+**z-scored against per-component training mean/std before weighting** (the raw
+embedding anomaly is ~1000× larger than the signal score and would otherwise
+dominate):
 
 ```
 # AudioQualityDetector.chunk_components -> raw (anom, sig, ae)
@@ -48,11 +68,9 @@ score = final / stats["p95"]                        # normalized by training p95
 ```
 
 `evaluate(audio, stats)` takes the full `norm_stats` dict (per-component mean/std +
-`p95`), not just `p95`. Per-component stats and `p95` are computed at train time in
-a two-pass loop in `__main__` (pass 1 collects raw components, pass 2 standardizes
-to derive `p95`).
+`p95`), not just `p95`.
 
-Key components:
+Key components (all in `model.py`):
 - `Wav2Vec2Embedder` — `facebook/wav2vec2-base` → 768-dim mean-pooled embedding per
   chunk. Loads/caches the HF model under `cache/`.
 - `NormalModel` — Mahalanobis distance (mean + inverse covariance) fit on clean
@@ -64,6 +82,13 @@ Key components:
   ae_mean, ae_std}`. The per-component mean/std drive standardization; `p95`
   rescales the final score. Must be regenerated (retrain) whenever the scoring
   components or weights change.
+
+### `train.py` — training
+
+`train_embedding_model` + `train_autoencoder` fit the models; `compute_norm_stats`
+runs the two-pass loop (pass 1 collects raw components, pass 2 standardizes to
+derive `p95`). `save_*` persist the artifacts. CLI: `--train-dir`, `--models-dir`,
+`--device`.
 
 ### `prepare_data.py` — dataset construction
 
@@ -79,12 +104,15 @@ VAD (`is_speech`) and signal-quality checks (`is_good_chunk`). Clean chunks land
 - **Chunks are 3 seconds, non-overlapping.** Trailing chunks shorter than 3s are
   dropped (`chunk_audio`). This is intentional and matches between training and
   scoring.
-- `chunk_audio` exists in *both* scripts with slightly different signatures — keep
-  them behaviorally consistent if you touch one.
+- `chunk_audio` exists in *both* `model.py` and `prepare_data.py` with slightly
+  different signatures — keep them behaviorally consistent if you touch one.
 - Audio, models (`*.pt`, `*.pkl`), and JSON results are gitignored. Do not commit
   files from `data/`, `raw_audio/`, `models/`, or `result/`.
-- Models must be trained before `test` mode works — it raises `FileNotFoundError`
-  if `models/normal_model.pkl` or `norm_stats.npy` is missing.
+- Models must be trained before inference works — `AudioQualityModel.load()` raises
+  `FileNotFoundError` if `models/normal_model.pkl` or `norm_stats.npy` is missing,
+  and `predict()` raises `RuntimeError` if called before `load()`.
+- When dropping `model.py` into the pipeline, fix up the `from base import ...`
+  line to the pipeline's import path for `BaseQualityModel`.
 
 ## Style
 

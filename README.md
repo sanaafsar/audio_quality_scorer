@@ -23,9 +23,15 @@ a relative anomaly score (~1.0 ≈ the boundary of normal training audio).
 
 ## Project layout
 
+Training and inference are separate. The **inference** path is a single,
+self-contained module (`model.py`) that subclasses `BaseQualityModel`, so it can
+be dropped straight into the media-quality pipeline.
+
 ```
 audio_quality_scorer/
-├── script.py          # Train models + score audio (main entry point)
+├── base.py            # BaseQualityModel contract (shared with the ML pipeline)
+├── model.py           # Inference: AudioQualityModel(BaseQualityModel) + shared building blocks
+├── train.py           # Training entry point (writes models/ artifacts)
 ├── prepare_data.py    # Build the clean training set (download + VAD + filtering)
 ├── requirements.txt   # Python dependencies
 ├── data/
@@ -39,6 +45,12 @@ audio_quality_scorer/
 ├── result/            # Saved JSON scoring outputs
 └── cache/             # Hugging Face model cache (created on first run)
 ```
+
+`model.py` holds the shared building blocks (embedder, autoencoder, Mahalanobis
+model, feature/chunking helpers) and the inference wrapper; `train.py` imports
+those building blocks and adds the training/persistence logic. The two stay in
+sync because the scoring core (`AudioQualityDetector`) lives in `model.py` and is
+reused by both.
 
 ## Setup
 
@@ -69,55 +81,59 @@ to train on into `data/train/`.
 
 ## Training
 
-Trains the Mahalanobis embedding model and the spectrogram autoencoder on the
-audio in `--train-dir`, then computes and saves normalization statistics
-(`mean`, `std`, `p95`).
+`train.py` trains the Mahalanobis embedding model and the spectrogram autoencoder
+on the audio in `--train-dir`, then computes and saves the normalization
+statistics (per-component mean/std + `p95`). All three artifacts are written to
+`--models-dir` (default `models/`).
 
 ```bash
-python script.py train --train-dir data/train
+python train.py --train-dir data/train
 ```
-
-Artifacts are written to `models/`.
 
 ## Scoring audio
 
+### As a pipeline model (the real integration)
+
+`model.py` exposes `AudioQualityModel`, a `BaseQualityModel` subclass. The
+pipeline decodes a media file and hands `predict()` a waveform + sample rate:
+
+```python
+from model import AudioQualityModel
+
+model = AudioQualityModel(models_dir="models")
+model.load()                                  # load weights once
+
+scores = model.predict(waveform, sample_rate)  # waveform: np.ndarray
+# {
+#   "overall": 0.29,            # quality in [0, 1], 1.0 = best
+#   "anomaly_score": 2.46,      # mean per-chunk anomaly, higher = worse (~1.0 = edge of normal)
+#   "max_chunk_anomaly": 5.39,  # worst single 3s chunk (less diluted than the mean)
+#   "num_chunks": 42.0
+# }
+```
+
+`predict` averages multi-channel input to mono and resamples to 16 kHz when
+`sample_rate != 16000`. Audio is split into non-overlapping 3-second chunks;
+chunks shorter than 3 seconds are dropped (so audio under 3s returns
+`overall = 1.0`, `num_chunks = 0`). `overall` follows the `BaseQualityModel`
+convention (`[0, 1]`, 1.0 = best); the raw anomaly fields keep the native
+"higher = worse" semantics for debugging.
+
+### Local test harness (CLI)
+
+`model.py` has a `__main__` that decodes a file and runs the same `predict`,
+useful for spot-checking before wiring into the pipeline:
+
 ```bash
-python script.py test --audio data/test/drunk.wav --output result/drunk.json
+python model.py --audio data/test/drunk.wav --output result/drunk.json
 ```
-
-Output (also printed to console):
-
-```json
-{
-  "audio_file": "data/test/drunk.wav",
-  "duration_seconds": 3.0,
-  "final_score": 0.646,
-  "num_chunks": 1,
-  "chunk_scores": [
-    { "score": 0.646, "time": "0 sec" }
-  ],
-  "model_status": {
-    "normal_model_loaded": true,
-    "autoencoder_loaded": true
-  }
-}
-```
-
-`final_score` is the mean of the per-chunk normalized scores. Audio is split into
-non-overlapping 3-second chunks; chunks shorter than 3 seconds are dropped.
 
 ## CLI reference
 
 ```
-python script.py <mode> [options]
+# Training
+python train.py [--train-dir DIR] [--models-dir DIR] [--device {cpu,cuda}]
 
-modes:
-  train             Train models from a folder of clean .wav files
-  test              Score a single audio file
-
-options:
-  --audio PATH      Audio file to score (required in test mode)
-  --train-dir PATH  Training audio directory (default: data/train)
-  --device {cpu,cuda}   Device (auto-detected if omitted)
-  --output PATH     Write test results to a JSON file
+# Local inference test harness
+python model.py --audio PATH [--models-dir DIR] [--device {cpu,cuda}] [--output PATH]
 ```
